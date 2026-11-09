@@ -4,10 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "news-digest-worker"
-version = "0.1.0"
+version = "0.1.1"
 description = "Mistral Workflow worker: daily news digest email"
 requires-python = ">=3.11"
-dependencies = ["mistralai>=3.10"]
+dependencies = [
+    "mistralai-workflows>=3.10",
+    "mistralai>=3.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
