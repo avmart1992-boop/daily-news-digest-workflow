@@ -1,6 +1,7 @@
 """Daily news digest: RF telecom law + Orange Business Services RU.
 
 Fetches Google News RSS, builds an HTML digest, sends via Gmail SMTP.
+All non-deterministic work (network, time, SMTP) happens in activities.
 """
 from __future__ import annotations
 
@@ -220,16 +221,28 @@ def _render(topics: List[Dict[str, Any]]) -> str:
 
 
 @workflows.activity()
-async def send_digest(
-    recipient: str, subject: str, html_body: str, dry_run: bool
+async def build_and_send(
+    topics: List[Dict[str, Any]], recipient: str, dry_run: bool
 ) -> Dict[str, Any]:
+    """Renders the digest and sends it. Runs outside the deterministic sandbox."""
+    today = datetime.now(MOSCOW).strftime("%d.%m.%Y")
+    subject = (
+        "Новости: телеком-законодательство РФ и Оранж бизнес сервисез — " + today
+    )
+    html_body = _render(topics)
+
     if dry_run:
         return {
             "sent": False,
             "dry_run": True,
             "subject": subject,
             "recipient": recipient,
+            "topics": [
+                {"title": t["title"], "fresh_count": len(t["fresh"])}
+                for t in topics
+            ],
         }
+
     sender = os.environ.get("GMAIL_ADDRESS", recipient)
     password = os.environ.get("GMAIL_APP_PASSWORD", "")
     msg = EmailMessage()
@@ -248,6 +261,10 @@ async def send_digest(
         "dry_run": False,
         "subject": subject,
         "recipient": recipient,
+        "topics": [
+            {"title": t["title"], "fresh_count": len(t["fresh"])}
+            for t in topics
+        ],
     }
 
 
@@ -272,24 +289,8 @@ class DailyNewsDigest:
                 for topic in TOPICS
             ]
         )
-        topics = list(results)
-        today = datetime.now(MOSCOW).strftime("%d.%m.%Y")
-        subject = (
-            "Новости: телеком-законодательство РФ и Оранж бизнес сервисез — " + today
-        )
-        html_body = _render(topics)
-        send_result = await send_digest(
+        return await build_and_send(
+            topics=list(results),
             recipient=input.recipient,
-            subject=subject,
-            html_body=html_body,
             dry_run=input.dry_run,
         )
-        return {
-            "subject": subject,
-            "sent": send_result.get("sent", False),
-            "dry_run": send_result.get("dry_run", False),
-            "topics": [
-                {"title": t["title"], "fresh_count": len(t["fresh"])}
-                for t in topics
-            ],
-        }
