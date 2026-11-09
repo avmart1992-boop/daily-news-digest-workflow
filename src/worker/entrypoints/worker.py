@@ -2,7 +2,7 @@
 import asyncio
 
 import mistralai.workflows as workflows
-from mistralai import Mistral
+from mistralai.client import Mistral
 
 
 async def main() -> None:

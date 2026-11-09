@@ -116,7 +116,7 @@ def _fallback_desc(item: Dict[str, Any]) -> str:
 def _describe(items: List[Dict[str, Any]]) -> List[str]:
     """Short descriptions via Mistral API; fallback to source and date."""
     try:
-        from mistralai import Mistral
+        from mistralai.client import Mistral
 
         client = Mistral()
         numbered = "\n".join(
