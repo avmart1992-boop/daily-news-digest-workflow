@@ -2,7 +2,8 @@
 
 Monitors four categories, filters relevance via an LLM, renders a structured
 digest (headline / source / gist / impact) and sends it via Gmail SMTP.
-All non-deterministic work (network, time, LLM, SMTP) happens in activities.
+Supports CC recipients. All non-deterministic work (network, time, LLM, SMTP)
+happens in activities.
 """
 from __future__ import annotations
 
@@ -83,6 +84,7 @@ TOPICS: List[Dict[str, Any]] = [
 
 class DigestInput(BaseModel):
     recipient: str = DEFAULT_RECIPIENT
+    cc: List[str] = []
     days: int = 2
     max_items_per_topic: int = 7
     dry_run: bool = False
@@ -304,7 +306,7 @@ def _render(topics: List[Dict[str, Any]]) -> str:
 
 @workflows.activity()
 async def build_and_send(
-    topics: List[Dict[str, Any]], recipient: str, dry_run: bool
+    topics: List[Dict[str, Any]], recipient: str, cc: List[str], dry_run: bool
 ) -> Dict[str, Any]:
     """Renders the digest and sends it. Runs outside the deterministic sandbox."""
     today = datetime.now(MOSCOW).strftime("%d.%m.%Y")
@@ -332,6 +334,7 @@ async def build_and_send(
             "dry_run": True,
             "subject": subject,
             "recipient": recipient,
+            "cc": cc,
             "topics": summary,
         }
 
@@ -341,6 +344,8 @@ async def build_and_send(
     msg["Subject"] = subject
     msg["From"] = sender
     msg["To"] = recipient
+    if cc:
+        msg["Cc"] = ", ".join(cc)
     msg.set_content("Откройте HTML-версию письма, чтобы увидеть сводку новостей.")
     msg.add_alternative(html_body, subtype="html")
     context = ssl.create_default_context()
@@ -353,6 +358,7 @@ async def build_and_send(
         "dry_run": False,
         "subject": subject,
         "recipient": recipient,
+        "cc": cc,
         "topics": summary,
     }
 
@@ -363,7 +369,7 @@ async def build_and_send(
     workflow_description=(
         "Мониторит новости для ООО «Оранж Бизнес Сервисез»: прямые упоминания, "
         "регуляторика РФ, B2B-рынок и технологические тренды; отправляет "
-        "структурированную выжимку на почту."
+        "структурированную выжимку на почту (с поддержкой копий CC)."
     ),
 )
 class DailyNewsDigest:
@@ -382,5 +388,6 @@ class DailyNewsDigest:
         return await build_and_send(
             topics=list(results),
             recipient=input.recipient,
+            cc=list(input.cc),
             dry_run=input.dry_run,
         )
