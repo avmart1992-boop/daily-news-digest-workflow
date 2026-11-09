@@ -1,7 +1,8 @@
-"""Daily news digest: RF telecom law + Orange Business Services RU.
+"""Daily news digest for an Orange Business Services RU analyst.
 
-Fetches Google News RSS, builds an HTML digest, sends via Gmail SMTP.
-All non-deterministic work (network, time, SMTP) happens in activities.
+Monitors four categories, filters relevance via an LLM, renders a structured
+digest (headline / source / gist / impact) and sends it via Gmail SMTP.
+All non-deterministic work (network, time, LLM, SMTP) happens in activities.
 """
 from __future__ import annotations
 
@@ -29,22 +30,52 @@ DEFAULT_RECIPIENT = os.environ.get("GMAIL_ADDRESS", "Avmart1992@gmail.com")
 
 TOPICS: List[Dict[str, Any]] = [
     {
-        "id": "telecom-law",
-        "emoji": "\U0001F4E1",
-        "title": "Телеком-законодательство РФ (связь и телекоммуникации)",
+        "id": "direct",
+        "emoji": "\U0001F7E0",
+        "title": "Прямые упоминания: Orange Business Services, ООО «Оранж Бизнес Сервисез», Эквант, Orange Cyberdefense",
         "queries": [
-            "закон о связи Госдума поправки",
-            "Минцифры связь операторы закон",
-            "телекоммуникации законодательство России",
+            "Orange Business Services Россия",
+            "Оранж Бизнес Сервисез",
+            "Эквант",
+            "Orange Cyberdefense Россия",
         ],
     },
     {
-        "id": "orange-business",
-        "emoji": "\U0001F7E0",
-        "title": "ООО «Оранж Бизнес Сервисез» (Orange Business Services в России)",
+        "id": "regulatory",
+        "emoji": "\U0001F4DC",
+        "title": "Регуляторные изменения в РФ (связь, КИИ, СОРМ, импортозамещение, санкционный комплаенс)",
         "queries": [
-            "Оранж Бизнес Сервисез",
-            "Orange Business Services Россия",
+            "Минцифры связь закон операторы",
+            "Роскомнадзор операторы связи штраф",
+            "закон КИИ критическая информационная инфраструктура",
+            "СОРМ требования операторы связи",
+            "импортозамещение телеком оборудование",
+            "подменные номера штрафы операторам",
+            "трансграничная передача данных закон",
+        ],
+    },
+    {
+        "id": "b2b-market",
+        "emoji": "\U0001F4E6",
+        "title": "Рынок B2B-телекома и ИТ: конкуренты и корпоративные продукты",
+        "queries": [
+            "Ростелеком бизнес корпоративный контракт",
+            "МТС бизнес облачные сервисы предприятиям",
+            "МегаФон корпоративный бизнес",
+            "Билайн Бизнес B2B",
+            "Яндекс Облако корпоративный",
+        ],
+    },
+    {
+        "id": "tech-trends",
+        "emoji": "\U0001F9EE",
+        "title": "Технологические тренды для B2B: IoT, Big Data, Edge, ИИ в телекоме, кибербезопасность корпоративных сетей",
+        "queries": [
+            "корпоративный IoT промышленный интернет вещей",
+            "SD-WAN корпоративные сети Россия",
+            "Edge Computing телеком",
+            "искусственный интеллект телеком операторы",
+            "кибербезопасность корпоративных сетей атака",
         ],
     },
 ]
@@ -55,6 +86,23 @@ class DigestInput(BaseModel):
     days: int = 2
     max_items_per_topic: int = 7
     dry_run: bool = False
+
+
+ROLE_PROMPT = """Роль: Ты — профильный ИИ-аналитик в сфере телекома и ИТ, персональный ассистент сотрудника ООО «Оранж Бизнес Сервисез» (международный B2B-провайдер связи и ИТ-решений в России).
+
+Контекст о компании для фильтрации новостей:
+- Компания работает строго в сегменте B2B (крупный бизнес, международные корпорации, дипломатические представительства). Новости про потребительские тарифы физлиц, мобильную связь 4G/5G для населения её НЕ касаются.
+- Ключевые направления: корпоративные сети (VPN, SD-WAN), спутниковая связь, облачные сервисы, информационная безопасность (включая Orange Cyberdefense), системная интеграция.
+- Специфика: материнская компания — французская группа Orange. ООО «Оранж Бизнес Сервисез» продолжает операционную деятельность в РФ, поэтому критически важны комплаенс, контрсанкции и российское регулирование.
+
+Правила:
+- Если новость сомнительная или кликбейтная — пометь questionable=true и кратко укажи почему в поле gist.
+- Не включай новости про массовый мобильный ритейл или бытовой интернет для физлиц: ставь relevant=false.
+- Влияние на Orange формулируй конкретно: риск регуляторного штрафа, угроза оттока клиентов к конкуренту, возможность предложить импортонезависимое решение и т.п. Если влияния нет — relevant=false.
+
+Тебе передадут список новостей (title, source, link). Верни ТОЛЬКО валидный JSON-массив той же длины, где каждый элемент — объект:
+{"headline": "смысловой заголовок, отражающий суть влияния", "gist": "что произошло, 1-2 предложения", "impact": "почему это важно для ООО «Оранж Бизнес Сервисез»", "questionable": false, "relevant": true}
+Без пояснений и без markdown-обёртки."""
 
 
 def _fetch_rss(query: str, limit: int = 15) -> List[Dict[str, Any]]:
@@ -100,48 +148,61 @@ def _fetch_rss(query: str, limit: int = 15) -> List[Dict[str, Any]]:
     return items
 
 
-def _fallback_desc(item: Dict[str, Any]) -> str:
-    bits = []
-    if item.get("source"):
-        bits.append(html.escape(item["source"]))
-    if item.get("published"):
-        try:
-            bits.append(
-                datetime.fromisoformat(item["published"]).strftime("%d.%m.%Y")
-            )
-        except Exception:
-            pass
-    return " — ".join(bits)
+def _fallback_analysis(item: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "headline": item["title"],
+        "gist": "",
+        "impact": "",
+        "questionable": False,
+        "relevant": True,
+    }
 
 
-def _describe(items: List[Dict[str, Any]]) -> List[str]:
-    """Short descriptions via Mistral API; fallback to source and date."""
+def _analyze(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """LLM analysis: headline, gist, impact, relevance. Falls back gracefully."""
     try:
         from mistralai.client import Mistral
 
         client = Mistral()
-        numbered = "\n".join(
-            f"{i + 1}. {it['title']}" for i, it in enumerate(items)
+        payload = json.dumps(
+            [
+                {"title": it["title"], "source": it.get("source", ""), "link": it["link"]}
+                for it in items
+            ],
+            ensure_ascii=False,
         )
-        prompt = (
-            "Ниже — заголовки российских новостей. Для каждого заголовка напиши "
-            "одно краткое описание (1 предложение, максимум 20 слов) на русском. "
-            "Верни ТОЛЬКО JSON-массив строк той же длины, без пояснений.\n\n"
-            + numbered
+        user_msg = (
+            "Новости для анализа (последовательность важна, порядок сохраняй):\n" + payload
         )
         resp = client.chat.complete(
-            model="mistral-small-latest",
-            messages=[{"role": "user", "content": prompt}],
+            model="mistral-medium-latest",
+            messages=[
+                {"role": "system", "content": ROLE_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
             temperature=0.2,
         )
         content = (resp.choices[0].message.content or "").strip()
         start, end = content.find("["), content.rfind("]")
         data = json.loads(content[start : end + 1])
         if isinstance(data, list) and len(data) == len(items):
-            return [str(x) for x in data]
+            out = []
+            for entry in data:
+                if not isinstance(entry, dict):
+                    return [_fallback_analysis(it) for it in items]
+                out.append(
+                    {
+                        "headline": str(entry.get("headline") or ""),
+                        "gist": str(entry.get("gist") or ""),
+                        "impact": str(entry.get("impact") or ""),
+                        "questionable": bool(entry.get("questionable", False)),
+                        "relevant": bool(entry.get("relevant", True)),
+                    }
+                )
+            return out
     except Exception:
         pass
-    return [_fallback_desc(it) for it in items]
+    return [_fallback_analysis(it) for it in items]
 
 
 @workflows.activity()
@@ -151,7 +212,6 @@ async def fetch_topic(
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     seen = set()
     fresh: List[Dict[str, Any]] = []
-    recent: List[Dict[str, Any]] = []
     for query in topic["queries"]:
         for item in _fetch_rss(query, limit=15):
             key = item["title"].lower()
@@ -166,16 +226,50 @@ async def fetch_topic(
                     published = None
             if published is not None and published >= cutoff:
                 fresh.append(item)
-            recent.append(item)
     fresh = fresh[:max_items]
-    recent = recent[:2]
+    analyses = _analyze(fresh) if fresh else []
+    for item, analysis in zip(fresh, analyses):
+        item["analysis"] = analysis
     return {
         "id": topic["id"],
         "emoji": topic["emoji"],
         "title": topic["title"],
         "fresh": fresh,
-        "background": recent,
     }
+
+
+def _render_item(item: Dict[str, Any]) -> str:
+    analysis = item.get("analysis") or {}
+    headline = analysis.get("headline") or item["title"]
+    gist = analysis.get("gist") or ""
+    impact = analysis.get("impact") or ""
+    questionable = analysis.get("questionable", False)
+    source = item.get("source") or ""
+    link = item.get("link") or ""
+    date_str = ""
+    if item.get("published"):
+        try:
+            date_str = datetime.fromisoformat(item["published"]).strftime("%d.%m.%Y")
+        except Exception:
+            date_str = ""
+    parts = ["<li>"]
+    parts.append("\U0001F4CC <b>" + html.escape(headline) + "</b>")
+    source_line = "\U0001F4F0 Источник: "
+    if source:
+        source_line += html.escape(source)
+    if link:
+        source_line += ' — <a href="' + html.escape(link, quote=True) + '">ссылка</a>'
+    if date_str:
+        source_line += " (" + date_str + ")"
+    parts.append(source_line)
+    if gist:
+        parts.append("\U0001F4DD Суть: " + html.escape(gist))
+    if impact:
+        parts.append("\U0001F4A1 Влияние на Orange: " + html.escape(impact))
+    if questionable:
+        parts.append("\u26A0\uFE0F Новость может быть сомнительной или кликбейтной — проверьте первоисточник.")
+    parts.append("</li>")
+    return "\n".join(parts)
 
 
 def _render(topics: List[Dict[str, Any]]) -> str:
@@ -183,39 +277,27 @@ def _render(topics: List[Dict[str, Any]]) -> str:
     parts = [f"<h2>Краткая сводка новостей на {today}</h2>"]
     for topic in topics:
         fresh = topic.get("fresh") or []
+        relevant_items = [
+            it for it in fresh if (it.get("analysis") or {}).get("relevant", True)
+        ]
         parts.append(f"<h3>{topic['emoji']} {html.escape(topic['title'])}</h3>")
-        if fresh:
-            descs = _describe(fresh)
+        if relevant_items:
             parts.append("<ul>")
-            for item, desc in zip(fresh, descs):
-                desc_html = html.escape(desc) if desc else ""
-                parts.append(
-                    "<li><b>"
-                    + html.escape(item["title"])
-                    + "</b>"
-                    + ("<br>" + desc_html if desc_html else "")
-                    + '<br><a href="'
-                    + html.escape(item["link"], quote=True)
-                    + '">Читать в источнике</a></li>'
-                )
+            for item in relevant_items:
+                parts.append(_render_item(item))
             parts.append("</ul>")
         else:
             parts.append("<p>Значимых новостей за последние 2 дня не найдено.</p>")
-            background = topic.get("background") or []
-            if background:
-                parts.append("<p><b>Фоновые материалы:</b></p><ul>")
-                for item in background:
-                    parts.append(
-                        "<li><b>"
-                        + html.escape(item["title"])
-                        + '<br><a href="'
-                        + html.escape(item["link"], quote=True)
-                        + '">Читать в источнике</a></li>'
-                    )
-                parts.append("</ul>")
+    total = sum(
+        1
+        for t in topics
+        for it in (t.get("fresh") or [])
+        if (it.get("analysis") or {}).get("relevant", True)
+    )
     parts.append(
         '<p style="color:#888;font-size:small;">Сводка подготовлена автоматически. '
-        "Источники: Google News (RSS). Время: Europe/Moscow.</p>"
+        "Отобрано новостей: " + str(total) + ". Источники: Google News (RSS). "
+        "Время: Europe/Moscow.</p>"
     )
     return "\n".join(parts)
 
@@ -231,16 +313,26 @@ async def build_and_send(
     )
     html_body = _render(topics)
 
+    summary = [
+        {
+            "title": t["title"],
+            "fresh_count": len(t["fresh"]),
+            "relevant_count": sum(
+                1
+                for it in t["fresh"]
+                if (it.get("analysis") or {}).get("relevant", True)
+            ),
+        }
+        for t in topics
+    ]
+
     if dry_run:
         return {
             "sent": False,
             "dry_run": True,
             "subject": subject,
             "recipient": recipient,
-            "topics": [
-                {"title": t["title"], "fresh_count": len(t["fresh"])}
-                for t in topics
-            ],
+            "topics": summary,
         }
 
     sender = os.environ.get("GMAIL_ADDRESS", recipient)
@@ -261,10 +353,7 @@ async def build_and_send(
         "dry_run": False,
         "subject": subject,
         "recipient": recipient,
-        "topics": [
-            {"title": t["title"], "fresh_count": len(t["fresh"])}
-            for t in topics
-        ],
+        "topics": summary,
     }
 
 
@@ -272,8 +361,9 @@ async def build_and_send(
     name="daily-news-digest",
     workflow_display_name="Ежедневная новостная сводка",
     workflow_description=(
-        "Ищет новости по телеком-законодательству РФ и Orange Business Services "
-        "и отправляет сводку на почту."
+        "Мониторит новости для ООО «Оранж Бизнес Сервисез»: прямые упоминания, "
+        "регуляторика РФ, B2B-рынок и технологические тренды; отправляет "
+        "структурированную выжимку на почту."
     ),
 )
 class DailyNewsDigest:
